@@ -766,14 +766,23 @@ class PlayerController extends ChangeNotifier {
     _saveQueueState();
     _startPositionSaving();
     notifyListeners();
-    // 预缓存封面图，避免打开播放页时出现纯色背景闪烁
-    _precacheCover(song);
+    // 预缓存封面图（本地歌曲无封面 URL，跳过网络请求避免卡顿）
+    if (song.source != SongSource.local) {
+      _precacheCover(song);
+    }
     unawaited(_syncDesktopLyricsVisibility());
-    unawaited(_loadClimax(song));
+    if (song.source != SongSource.local) {
+      unawaited(_loadClimax(song));
+    }
 
     try {
       String url;
       String? networkUrl;
+      // 本地歌曲直接使用文件路径，跳过下载索引校验（SharedPreferences + 文件存在性检查），
+      // 避免 100-400ms 额外延迟。
+      if (song.source == SongSource.local) {
+        url = song.id;
+      } else {
       debugPrint(
         '[KA Music][playback] request=$requestSerial local-lookup begin',
       );
@@ -785,8 +794,6 @@ class PlayerController extends ChangeNotifier {
       );
       if (local != null) {
         url = local;
-      } else if (song.source == SongSource.local) {
-        url = song.id;
       } else {
         debugPrint(
           '[KA Music][playback] request=$requestSerial url-resolve begin',
@@ -809,6 +816,7 @@ class PlayerController extends ChangeNotifier {
         url = playUrl.url;
         networkUrl = playUrl.url;
       }
+      } // end else (not local song)
       if (requestSerial != _playRequestSerial) return;
 
       // setUrl/setAudioSource 不能并发执行。快速点击“下一曲”时，让已经开始的
@@ -818,6 +826,9 @@ class PlayerController extends ChangeNotifier {
       );
       await _serializeSourceChange(() async {
         if (requestSerial != _playRequestSerial) return;
+        // 歌词加载与音频加载并行启动，不等待音频加载完成，
+        // 缩短切歌总耗时（歌词解析 + 网络请求与音频管线初始化并行）。
+        unawaited(loadLyrics(song));
         debugPrint(
           '[KA Music][playback] request=$requestSerial source-load begin',
         );
@@ -835,7 +846,6 @@ class PlayerController extends ChangeNotifier {
 
         isPreparing = false;
         notifyListeners();
-        unawaited(loadLyrics(song));
         if (wasPlaying) {
           unawaited(audioPlayer.setVolume(1.0));
         }
@@ -1415,11 +1425,13 @@ class PlayerController extends ChangeNotifier {
     final cacheKey = 'cache_lyric_${song.hash}';
 
     if (song.source == SongSource.local) {
+      // 本地歌曲仅读取本地歌词（.lrc 文件 + 嵌入标签），禁止网络搜索，
+      // 避免切歌时因网络请求导致 10 秒超时等待。
       final lines = await LocalLyricsService(
         api: _api,
         cache: cache,
         embeddedLyricsReader: localMusic?.getEmbeddedLyrics,
-      ).load(song);
+      ).loadLocalOnly(song);
       if (currentSong?.hash == song.hash) {
         lyrics = lines;
         notifyListeners();
@@ -1737,11 +1749,13 @@ class PlayerController extends ChangeNotifier {
     try {
       String url;
       String? networkUrl;
+      // 本地歌曲直接使用文件路径，跳过下载索引校验
+      if (song.source == SongSource.local) {
+        url = song.id;
+      } else {
       final local = await downloadController?.localPathFor(song, audioQuality);
       if (local != null) {
         url = local;
-      } else if (song.source == SongSource.local) {
-        url = song.id;
       } else {
         final PlayUrl playUrl;
         if (song.isCloudDrive) {
@@ -1764,6 +1778,7 @@ class PlayerController extends ChangeNotifier {
         url = playUrl.url;
         networkUrl = playUrl.url;
       }
+      } // end else (not local song)
       await _audioHandler.loadSong(
         song: song,
         url: url,
@@ -3360,18 +3375,21 @@ class PlayerController extends ChangeNotifier {
 
     try {
       String url;
+      // 本地歌曲直接使用文件路径，跳过下载索引校验
+      if (song.source == SongSource.local) {
+        url = song.id;
+      } else {
       final local = await downloadController?.localPathFor(song, audioQuality);
       if (requestSerial != _playRequestSerial) return;
       if (local != null) {
         url = local;
-      } else if (song.source == SongSource.local) {
-        url = song.id;
       } else {
         final playUrl = await _resolvePlayUrl(song);
         if (requestSerial != _playRequestSerial) return;
         if (playUrl.url.isEmpty) return;
         url = playUrl.url;
       }
+      } // end else (not local song)
 
       // 恢复音源与用户主动点歌共用同一串行队列。覆盖安装后，
       // 此预加载可能与“播放全部”同时发生；旧恢复请求一旦失效，
