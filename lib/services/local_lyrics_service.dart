@@ -125,6 +125,70 @@ class LocalLyricsService {
         ? const []
         : [LyricLine(time: Duration.zero, text: plainLyrics)];
   }
+
+  /// 仅加载本地歌词（.lrc 同名文件 + 嵌入标签 + 本地缓存），禁止网络搜索。
+  ///
+  /// 用于本地歌曲切歌场景，避免 [load] 中的网络搜索导致 10 秒超时等待。
+  Future<List<LyricLine>> loadLocalOnly(Song song) async {
+    final file = File(song.id);
+    final dot = file.path.lastIndexOf('.');
+    final slash = file.path.lastIndexOf(RegExp(r'[/\\]'));
+    final stem = dot > slash ? file.path.substring(0, dot) : file.path;
+    for (final extension in ['.lrc', '.LRC']) {
+      try {
+        final lrc = File('$stem$extension');
+        if (!await lrc.exists() || await lrc.length() > 2 * 1024 * 1024) {
+          continue;
+        }
+        final content = decodeLocalLyricBytes(await lrc.readAsBytes());
+        final lines = parseLyrics(content);
+        if (lines.isNotEmpty) return lines;
+      } catch (e) {
+        debugPrint('Could not read local lyric file: $e');
+      }
+    }
+
+    String? plainLyrics;
+    try {
+      final embedded = await _embeddedLyricsReader(song.id);
+      final lines = parseLyrics(embedded);
+      if (lines.isNotEmpty) return lines;
+      if (embedded != null && embedded.trim().isNotEmpty) {
+        plainLyrics = embedded.trim();
+      }
+    } catch (e) {
+      debugPrint('Could not read embedded lyrics: $e');
+    }
+
+    final cacheKey = 'cache_local_lyric_v1_${song.id}';
+    final stat = await file.stat();
+    final signature = jsonEncode([
+      song.title,
+      song.artist,
+      song.duration?.inMilliseconds,
+      stat.size,
+      stat.modified.millisecondsSinceEpoch,
+    ]);
+    try {
+      final cached = await _cache?.read<List<LyricLine>>(
+        cacheKey,
+        decode: (json) => json['signature'] == signature
+            ? (json['lines'] as List? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .map(LyricLine.fromCache)
+                .toList()
+            : const [],
+      );
+      if (cached != null && cached.data.isNotEmpty) return cached.data;
+    } catch (e) {
+      debugPrint('Could not read local lyric cache: $e');
+    }
+
+    // 本地歌曲不发起网络搜索，直接返回
+    return plainLyrics == null
+        ? const []
+        : [LyricLine(time: Duration.zero, text: plainLyrics)];
+  }
 }
 
 String decodeLocalLyricBytes(List<int> bytes) {
